@@ -141,6 +141,11 @@ def print_agri():
 # Factorio 模块效果为加法叠加；speed 下限 -80%，consumption 下限 -80%。
 # 红瓶阶段造不出 productivity/speed/efficiency-module（都要 py-science-pack-2 + logistic），
 # 唯一能用的是生物模块 sap-tree / vrauks：speed +1.0、pollution +1.0，**没有功耗惩罚**。
+#
+# 注意 pollution 是乘法且基础值为负：fwf-mk01 的
+#   energy_source.emissions_per_minute = {"pollution": -35}
+# 所以 10 个 sap-tree 不是"污染 x11"，而是**净化能力 x11**（-35 -> -385/min）。
+# 农业机器在 Py 里是碳负设计，插满 sap-tree 属于三重收益：速度 x11、无功耗惩罚、净化 x11。
 MODULE_SETS = {
     "空":                {"speed": 0.0, "consumption": 0.0, "productivity": 0.0},
     "10× sap-tree":      {"speed": 1.0, "consumption": 0.0, "productivity": 0.0},
