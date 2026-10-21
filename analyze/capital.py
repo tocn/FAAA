@@ -36,6 +36,11 @@ FLUID_MJ = {
     "steam": 0.235,
 }
 
+# 「本阶段造不出来」的物品按高价进口计，不能按原矿价计。
+# 用低价兜底会破坏一个基本性质：配方集变大，成本只可能降。
+# 原因很直接——低价兜底 = 假装它便宜，等真配方解锁反而"涨价"。
+IMPORT_MJ = 1e4
+
 # 视为原矿、不再追问来源的东西
 RAW_OK = {
     "iron-ore", "copper-ore", "coal", "stone", "raw-coal", "ore-quartz",
@@ -67,6 +72,7 @@ class Capital:
         self.dump = d
         self.R = d["recipe"]
         self.T = d["technology"]
+        self.packs = {"automation-science-pack"}
         self.allowed = self._stage_recipes(stage) if stage == "red" else set(self.R)
         self.prod = {}
         for rn, r in self.R.items():
@@ -76,17 +82,47 @@ class Capital:
         self._craft_memo: dict[str, float] = {}
         self._cost: dict[str, float] = {}
         self._best: dict[str, str] = {}
+        self._ing_cache: dict[str, list] = {}
+        self._res_cache: dict[str, list] = {}
         self._machine = self._machine_index()
 
     # ---------- 阶段筛选 ----------
+    def set_stage(self, packs: set[str]) -> None:
+        """把可用配方切到「目前能产的科技瓶集合」对应的阶段，并清空价格缓存。
+
+        成本是路径依赖的：解锁一条更省的配方，整个下游价格都会变。
+        所以同一个物品在不同阶段有不同的价格，不能算一次就锁死。
+        """
+        self.packs = set(packs)
+        self.allowed = self._recipes_for(packs)
+        self._item_memo.clear()
+        self._craft_memo.clear()
+        self._cost = {}
+        self._best = {}
+
+    def _recipes_for(self, packs: set[str]) -> set[str]:
+        """可以研究到的科技 → 解锁的配方。
+
+        科技可研究 = 它的 unit.ingredients 全部落在 packs 里；
+        没有 unit 的科技是开局自带，永远算在内。
+        """
+        out = set()
+        for n, p in self.T.items():
+            u = p.get("unit")
+            if u:
+                ings = {i[0] for i in u.get("ingredients") or []}
+                if not ings <= packs:
+                    continue
+            for e in (p.get("effects") or []):
+                if e.get("type") == "unlock-recipe":
+                    out.add(e["recipe"])
+        out |= {n for n, r in self.R.items() if r.get("enabled")}
+        return out
+
     def _stage_recipes(self, stage: str) -> set[str]:
         if stage != "red":
             return set(self.R)
-        red = self._closure("automation-science-pack")
-        out = {e["recipe"] for n in red for e in (self.T[n].get("effects") or [])
-               if e.get("type") == "unlock-recipe"}
-        out |= {n for n, r in self.R.items() if r.get("enabled")}
-        return out
+        return self._recipes_for({"automation-science-pack"})
 
     def _closure(self, tech: str) -> set[str]:
         seen, stack = set(), [tech]
@@ -147,6 +183,20 @@ class Capital:
                 out.append((i[0], float(i[1])))
         return out
 
+    def _ings(self, rn: str) -> list[tuple[str, float]]:
+        v = self._ing_cache.get(rn)
+        if v is None:
+            v = self._ingredients(self.R[rn])
+            self._ing_cache[rn] = v
+        return v
+
+    def _ress(self, rn: str) -> list[tuple[str, float]]:
+        v = self._res_cache.get(rn)
+        if v is None:
+            v = self._result_pairs(self.R[rn])
+            self._res_cache[rn] = v
+        return v
+
     def craft_mj(self, rn: str) -> float:
         """做一次配方的**燃料当量**（MJ，已含机器速度）。
 
@@ -174,7 +224,7 @@ class Capital:
             self._relax()
         return self._best.get(item)
 
-    def _relax(self, rounds: int = 200) -> None:
+    def _relax(self, rounds: int = 80) -> None:
         """价值迭代求每个物品的单位成本（MJ/个）。
 
         从 INF 往下收敛，所以循环配方（A 需要 B、B 需要 A）不会拿到虚假低价，
@@ -193,18 +243,17 @@ class Capital:
             referenced |= {n for n, _ in self._ingredients(self.R[rn])}
         fluids = set(self.dump.get("fluid") or {})
         for n in referenced | set(self.prod):
-            if n not in producible:
-                cost[n] = 0.0 if n in fluids else MINE_MJ
+            if n not in producible and n not in RAW_OK and n not in FLUID_MJ:
+                cost[n] = 0.0 if n in fluids else IMPORT_MJ
         for n in RAW_OK:
             cost.setdefault(n, MINE_MJ)
         for n, v in FLUID_MJ.items():
             cost[n] = v
 
         def recipe_cost(rn: str) -> tuple[float, dict[str, float]]:
-            r = self.R[rn]
             total = self.craft_mj(rn)
             used: dict[str, float] = {}
-            for ing, q in self._ingredients(r):
+            for ing, q in self._ings(rn):
                 c = cost.get(ing, INF)
                 if c == INF:
                     # 流体取不到来源时按 0 计：水泵/管道本来就是免费供给，
@@ -224,7 +273,7 @@ class Capital:
                 total, _ = recipe_cost(rn)
                 if total == INF:
                     continue
-                for name, amount in self._result_pairs(r):
+                for name, amount in self._ress(rn):
                     if name in FLUID_MJ:
                         continue          # 公用流体用固定价，别让配方把它算歪
                     per = total / max(amount, 1e-9)
@@ -291,6 +340,23 @@ class Capital:
     def entity(self, item: str) -> dict:
         raw, mj = self.item(item)
         return {"item": item, "raw": raw, "build_mj": mj}
+
+    def price(self, item: str) -> float | None:
+        """能算出来的成本；算不出来返回 None，而不是拿原矿兜底价冒充。
+
+        这个区分很重要：兜底价会让「本阶段还造不出来的东西」看起来只要 0.25 MJ，
+        等下一阶段真配方解锁，价格反而"上涨"——违反「配方集变大成本只会降」。
+        之前的 iron-gear-wheel 就是这样 0.2 → 2.0 的假信号。
+        """
+        if not self._cost:
+            self._relax()
+        if item in RAW_OK or item in FLUID_MJ:
+            return self._cost.get(item)
+        v = self._cost.get(item)
+        # 还在按进口价计价 = 本阶段其实造不出来，如实返回 None
+        if v is None or v >= IMPORT_MJ * 0.5:
+            return None
+        return v
 
     def top_raw(self, raw: dict, n: int = 8) -> list[tuple[str, float]]:
         return sorted(raw.items(), key=lambda kv: -kv[1])[:n]

@@ -64,6 +64,36 @@ class LP:
             return self._solve_ortools()
         return self._solve_simplex()
 
+    def solve_duals(self):
+        """求解并返回每个约束的对偶值（影子价格）。仅 OR-Tools 后端可用。
+
+        对偶的经济含义：约束右端加 1 个单位，最优目标值变化多少。
+        在物料平衡约束上，这就是该物品的**边际成本**——
+        比递归/迭代摊成本可靠，因为它自动处理联产和循环配方。
+        """
+        if not HAS_ORTOOLS:
+            return None, None
+        solver = pywraplp.Solver.CreateSolver("GLOP")
+        if solver is None:
+            return None, None
+        inf = solver.infinity()
+        x = [solver.NumVar(0, inf, f"x{i}") for i in range(self.n)]
+        cons = []
+        for coefs, op, rhs in self.rows:
+            expr = solver.Sum(coefs[i] * x[i] for i in range(self.n) if coefs[i])
+            if op == "<=":
+                cons.append(solver.Add(expr <= rhs))
+            elif op == ">=":
+                cons.append(solver.Add(expr >= rhs))
+            else:
+                cons.append(solver.Add(expr == rhs))
+        solver.Minimize(solver.Sum(self.c[i] * x[i] for i in range(self.n) if self.c[i]))
+        if solver.Solve() != pywraplp.Solver.OPTIMAL:
+            return None, None
+        vals = [v.solution_value() for v in x]
+        duals = [c.dual_value() for c in cons]
+        return vals, duals
+
     # ---------- OR-Tools ----------
     def _solve_ortools(self):
         solver = pywraplp.Solver.CreateSolver("SCIP" if self.integer else "GLOP")
