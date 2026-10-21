@@ -113,7 +113,7 @@ python -m analyze.yafc --candidates out/watch/<run>/candidates.json --out out/wa
 
 只有满足 `target + recipe + delta_per_min > 0` 的候选才会进表 —— 电力、科技类任务进不了生产表。
 
-## 六、agent 复核
+## 七、agent 复核
 
 `watch.py` 只做机械计算。真正需要判断的（配方分支、科技阶段、任务合并）
 交给 agent，见 `AGENT_PROTOCOL.md`。
@@ -121,7 +121,7 @@ python -m analyze.yafc --candidates out/watch/<run>/candidates.json --out out/wa
 在会话里说一句「复核一下 out/watch 里最新的 candidates」，agent 会：
 读 candidates.json → 逐条判断 → 写 final.json + audit → 跑 apply 生成命令。
 
-## 七、快照字段语义（实测，别按文档想当然）
+## 八、快照字段语义（实测，别按文档想当然）
 
 | 字段 | 含义 |
 |---|---|
@@ -139,7 +139,7 @@ python -m analyze.yafc --candidates out/watch/<run>/candidates.json --out out/wa
 3. 电力统计**按实体名分项**（`steam-engine`/`pump`…），没有 `"electricity"` 键
 4. `storage_counts` 是**净累积不是库存**，算不出「还能撑几分钟」
 
-## 八、已知限制
+## 九、已知限制
 
 1. 没有真实库存，库存告急只能用供给率判断
 2. 速率是整局平均，反映不了最近十分钟的突变
@@ -147,3 +147,45 @@ python -m analyze.yafc --candidates out/watch/<run>/candidates.json --out out/wa
 4. 引擎统计只覆盖少数物品，Pyanodons 上万种里绝大多数没被记录
 5. Instrument Mode **禁用多人**
 6. `--start-server` 起不来（卡 auth），无头加载只能用 `--benchmark`
+
+## 十、燃料通道（红瓶阶段硬约束）
+
+能量载体能不能用来发电，取决于它的**物理形态**，这一点在 Py 里是硬约束，
+不是"效率高低"的问题：
+
+| 通道 | 载体 | 设备 | effectivity | 红瓶可用 |
+|---|---|---|---|---|
+| 电力-固体 | `fuel_category ∈ {chemical, biomass}` | `boiler` → `steam-engine` | 0.5 | ✅ |
+| 电力-流体 | `fuel_category = None` | `oil-boiler-mk01` / `py-oil-powerplant` / `py-burner` | 2 / 1 / 1 | ❌ 全需 py1 |
+| 工艺-流体 | 同上 | `glassworks-mk01` / `smelter-mk01` | 1.0 | ✅ |
+
+原因在数据里：`coal-gas` 和 `tar` 有 `fuel_value` 但**没有 `fuel_category`**，
+而 `boiler` 的 `energy_source.fuel_categories` 只有 `["chemical","biomass"]`。
+两者接不上，所以**流体燃料进不了锅炉，红瓶阶段无法发电**。
+
+红瓶阶段真正能烧流体的只有两台 `energy_source.type = "fluid"` 的机器：
+
+- `glassworks-mk01`（`glass` 科技解锁，红瓶可用，5 条配方含造玻璃必经的 `glass-1`）
+- `smelter-mk01`（`alloys-mk01` 解锁，但该类 45 条配方红瓶只开出 1 条 `duralumin-1`，
+  且需要铝板，实际用不起来）
+
+两者都是 10 MW、`effectivity 1.0`。所以流体燃料的价值是二元的：
+
+- **没有工艺炉负荷** → 只能放空，热值等于 0
+- **有工艺炉负荷** → 1 MJ 流体顶 1 MJ 机器用电，等价 2 MJ 固体燃料（比锅炉发电贵一倍）
+
+受此约束后的 EROI（`python -m analyze.fuel_model`）：
+
+| 路线 | 无工艺负荷 | 有工艺负荷（≥100 MJ/min） | 旧算法（错，假设能进锅炉） |
+|---|---|---|---|
+| raw-coal 直烧 | 83.3% | 90.5% | 83.3% |
+| raw-coal → coal | 31.2% | 40.0% | 78.1% |
+| coal → coke | 22.8% | 30.0% | 82.1% |
+
+最后一行是这次修正的核心：**之前 82.1% 的 coke 结论建立在一个不可能的前提上**
+——把煤气和焦油送进锅炉。它们进不去。修正后 coke 只有 22.8%～30%。
+
+`raw-coal` 在有工艺负荷时反而升到 90.5%，是因为蒸馏副产物走工艺通道时
+effectivity 是 1.0（锅炉路径只有 0.5），即"把煤转成煤气"这条路
+只有在**有玻璃/冶炼产能消化**时才划算。收益在工艺容量 100 MJ/min 处饱和，
+一台玻璃窑满负荷是 600 MJ/min，所以只要真的在造玻璃，这个条件不难满足。
