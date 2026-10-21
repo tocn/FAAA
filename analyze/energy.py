@@ -135,6 +135,51 @@ def print_agri():
               f'{r["elec_mj"]:9.1f} {r["coal_mult"]:8.1f}x {r["eroi"]*100:6.2f}%')
 
 
+
+
+# ---------------- 模块方案（满插件） ----------------
+# Factorio 模块效果为加法叠加；speed 下限 -80%，consumption 下限 -80%。
+# 红瓶阶段造不出 productivity/speed/efficiency-module（都要 py-science-pack-2 + logistic），
+# 唯一能用的是生物模块 sap-tree / vrauks：speed +1.0、pollution +1.0，**没有功耗惩罚**。
+MODULE_SETS = {
+    "空":                {"speed": 0.0, "consumption": 0.0, "productivity": 0.0},
+    "10× sap-tree":      {"speed": 1.0, "consumption": 0.0, "productivity": 0.0},
+    "10× speed-module":  {"speed": 0.4, "consumption": 1.0, "productivity": 0.0},
+    "10× speed-mk3":     {"speed": 1.0, "consumption": 1.5, "productivity": 0.0},
+    "10× prod-mk3":      {"speed": -0.75, "consumption": 2.0, "productivity": 0.3},
+    "10× eff-mk3":       {"speed": 0.0, "consumption": -0.5, "productivity": 0.0},
+}
+BASE_SPEED, BASE_KW = 0.0909, 450.0
+LOG1_TIME, LOG1_OUT = 80.0, 12.0
+
+
+def module_rows(slots: int = 10):
+    out = []
+    seed = nursery_mj_per_batch()
+    for name, e in MODULE_SETS.items():
+        spd = max(0.2, 1 + e["speed"] * slots)
+        cons = max(0.2, 1 + e["consumption"] * slots)
+        prod = 1 + e["productivity"] * slots
+        real_t = LOG1_TIME / (BASE_SPEED * spd)
+        elec = BASE_KW / 1000 * cons * real_t + seed
+        produced = LOG1_OUT * prod
+        out.append({"set": name, "speed": spd, "cons": cons, "prod": prod,
+                    "elec": elec, "out": produced,
+                    "coal": elec / POWER_EFF / produced,
+                    "eroi": produced / (elec / POWER_EFF)})
+    return out
+
+
+def print_modules():
+    print()
+    print("=== 林业模块方案（log1，10 槽） ===")
+    print(f'{"方案":20s} {"速度×":>6s} {"功耗×":>6s} {"产能×":>6s} {"电耗MJ":>9s} {"折煤":>8s} {"EROI":>7s}')
+    for r in module_rows():
+        print(f'{r["set"]:20s} {r["speed"]:6.1f} {r["cons"]:6.1f} {r["prod"]:6.1f} '
+              f'{r["elec"]:9.1f} {r["coal"]:7.1f}x {r["eroi"]*100:6.2f}%')
+
+
 if __name__ == "__main__":
     main()
     print_agri()
+    print_modules()
