@@ -189,3 +189,73 @@ python -m analyze.yafc --candidates out/watch/<run>/candidates.json --out out/wa
 effectivity 是 1.0（锅炉路径只有 0.5），即"把煤转成煤气"这条路
 只有在**有玻璃/冶炼产能消化**时才划算。收益在工艺容量 100 MJ/min 处饱和，
 一台玻璃窑满负荷是 600 MJ/min，所以只要真的在造玻璃，这个条件不难满足。
+
+## 十一、风力发电机（红瓶阶段）
+
+红瓶阶段唯一的非燃料电源是 **`multiblade-turbine-mk01`**，由 `steel-processing`
+解锁（只需红瓶）。`hawt` / `vawt` 系列要 `wind-mk01`（py1），`solar-panel`
+要 `solar-energy`（py1+logistic），`accumulator` 要
+`electric-energy-accumulators`（py1）——**红瓶阶段连储能都没有**。
+
+### 功率：均值等于标称，但摆幅极大
+
+`scripts/wind/wind.lua:251` 的公式：
+
+```lua
+power = max_energy_production * (1 + variation * wind_speed)
+wind_speed = (sin(2 * tick/10000) + sin(pi * tick/10000)) / 2
+```
+
+`wind_speed` 在 [-1, 1] 之间摆动，长期均值为 0，所以**平均功率 = 标称值**。
+但 `variation` 决定摆幅：
+
+| 型号 | 标称 | variation | 瞬时区间 | 均值 |
+|---|---|---|---|---|
+| multiblade-mk01 | 550 kW | 0.9 | **55 ~ 1045 kW** | 550 kW |
+| hawt-mk01 | 5 MW | 0.5 | 2.5 ~ 7.5 MW | 5 MW |
+| vawt-mk01 | 4 MW | 0.7 | 1.2 ~ 6.8 MW | 4 MW |
+
+mk01 的摆幅是 **19 倍**，而且红瓶阶段没有蓄电器，波动直接进电网。
+所以它只能当"叠加在锅炉上的省煤器"用——锅炉会自动降载，风力多发就少烧煤，
+风力掉到 55 kW 时锅炉顶上来。**不能当基荷**。
+
+### 成本 / 功率比
+
+`python -m analyze.capital` 算出（内含能量 = 采矿 + 加工 + 建造那一次的电，
+统一折成 MJ 燃料当量）：
+
+| 方案 | 功率 | 内含能量 | MJ/kW | 实际占地 | 格/MW |
+|---|---|---|---|---|---|
+| 风力 multiblade-mk01 | 550 kW | 864 MJ | **1.57** | 718 格 | **1306** |
+| 煤电 1锅炉+2蒸汽机 | 3.5 MW | 349 MJ | **0.10** | 27 格 | **7.7** |
+
+风力机的单位功率造价是煤电的 **16 倍**，占地是 **169 倍**。
+
+占地的关键：建筑本体只有 6.4×6.4 格，但每台会生成一个
+`±13.4` 的隐形碰撞体（`prototypes/buildings/multiblade-turbine-mk01.lua`
+里的 `simple-entity-with-force`），强制与同类保持 **26.8×26.8** 的净空。
+光看建筑会低估 17 倍。各型的净空：hawt-mk01 26.8、vawt-mk01 35.8、
+multiblade-mk03 24.8（但那是 34 MW，占地效率 18 格/MW，好得多）。
+
+### 回本时间
+
+多花的建造费 1.47 MJ/kW，煤电每发 1 kW 电要烧 2 kW 热（蒸汽机 effectivity 0.5），
+即 2 J/s/kW。所以：
+
+```
+1.47 MJ/kW ÷ 0.002 MJ/s/kW ≈ 735 s ≈ 12 分钟
+```
+
+**只要连续跑 12 分钟就赚回建造差价**。所以纯能量账上风力很划算，
+真正的约束是**地**和**波动**，不是造价。
+
+### 建造材料
+
+```
+multiblade-turbine-mk01 = small-electric-pole×6 + small-parts-01×4
+                        + stone-brick×20 + inductor1×18 + steel-plate×10 + fish×5
+```
+
+`steel-plate×10` 占 53%，`inductor1×18` 占 36%。`fish×5` 只需钓一条鱼
+（`fish` 实体的 `minable.results` 就是 5 个）。注意 `fish` 是 pyalienlife 的
+模块，红瓶阶段无法养殖，但可以手钓。
