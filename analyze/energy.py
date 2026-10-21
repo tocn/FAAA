@@ -90,5 +90,51 @@ def main() -> None:
         print(f'  {r["route"]:26s}  {r["note"]}')
 
 
+
+
+# ---------------- 农业线（fwf 林业） ----------------
+# fwf-mk01: speed 0.0909 / 450kW；botanical-nursery: speed 1 / 125kW
+# 关键：fwf 升级是负优化 —— mk02 speed +7% 但功率 +344%
+FWF = {"fwf-mk01": (0.0909, 450.0), "fwf-mk02": (0.0976, 2000.0),
+       "fwf-mk03": (0.0989, 3000.0), "fwf-mk04": (0.0994, 4000.0)}
+NURSERY = (1.0, 125.0)
+LOG_MJ = 4.0
+NURSERY_CRAFT_S = 20.0
+
+
+def nursery_mj_per_batch() -> float:
+    speed, kw = NURSERY
+    return kw / 1000.0 * (NURSERY_CRAFT_S / speed)
+
+
+def agri_rows():
+    seed_mj = nursery_mj_per_batch()      # 每批 3 个 seedling
+    out = []
+    recipes = [("log1", 80, 3), ("log2", 60, 4), ("log3", 40, 6),
+               ("log5", 20, 7), ("log7", 25, 9), ("log8", 20, 10)]
+    for machine, (speed, kw) in FWF.items():
+        for name, t, n in recipes:
+            elec = kw / 1000.0 * (t / speed) + seed_mj
+            out_mj = n * LOG_MJ
+            out.append({
+                "machine": machine, "recipe": name,
+                "out_mj": out_mj, "elec_mj": elec,
+                "x": elec / out_mj,
+                "coal_mult": elec / POWER_EFF / out_mj,
+                "eroi": out_mj / (elec / POWER_EFF),
+            })
+    return out
+
+
+def print_agri():
+    print()
+    print("=== 农业线（含幼苗培育电） ===")
+    print(f'{"机器":10s} {"配方":7s} {"产出MJ":>8s} {"电耗MJ":>9s} {"折煤倍数":>9s} {"EROI":>7s}')
+    for r in agri_rows():
+        print(f'{r["machine"]:10s} {r["recipe"]:7s} {r["out_mj"]:8.1f} '
+              f'{r["elec_mj"]:9.1f} {r["coal_mult"]:8.1f}x {r["eroi"]*100:6.2f}%')
+
+
 if __name__ == "__main__":
     main()
+    print_agri()
