@@ -96,6 +96,23 @@ python -m analyze.graph    build <data-raw-dump.json> data
 python -m analyze.machines       <data-raw-dump.json> data/machines.json
 ```
 
+## 六、导进 YAFC（量化求解）
+
+```bash
+python -m analyze.yafc --candidates out/watch/<run>/candidates.json --out out/watch/plan.yafc
+```
+
+用 YAFC 打开 `plan.yafc`，它会自己跑 OR-Tools 算出精确机器数、模块、副产物。
+
+格式是从 `YAFC CE 2.20.0` 的真实工程文件反推出来的：
+
+- 目标速率写在 `content.links`，不是写在行上
+- `amount` 的单位是**每秒**，60/min 要写成 `1`
+- 引用格式 `!Recipe.<名字>!normal` / `!Item.<名字>!normal` / `!Entity.<名字>!normal`
+- `entity` 按该配方类别里机器速度的**中位数**挑（最高速往往是后期机器）
+
+只有满足 `target + recipe + delta_per_min > 0` 的候选才会进表 —— 电力、科技类任务进不了生产表。
+
 ## 六、agent 复核
 
 `watch.py` 只做机械计算。真正需要判断的（配方分支、科技阶段、任务合并）
