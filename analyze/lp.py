@@ -1,27 +1,37 @@
-"""纯标准库的两阶段单纯形求解器。
+"""LP 求解器封装。
 
-支持:
-    min c^T x
-    s.t.  A_ub x <= b_ub,  A_eq x = b_eq,  A_ge x >= b_ge
-          x >= 0
+优先用 Google OR-Tools（与 YAFC 同一个求解器），环境里没有时退回内置两阶段单纯形。
 
-规模按几十个变量设计（稠密表），不做稀疏优化。
-数值容差 EPS 取 1e-9；退化时用 Bland 规则防循环。
+接口保持简单：
+    lp = LP(n).le({i: c}, rhs).eq(...).ge(...).obj({i: c})
+    status, x, obj = lp.solve()
+
+    status: "optimal" / "infeasible" / "unbounded" / "error"
+    obj   : minimize c^T x 的值（要 maximize 就传负系数）
+    integer=True 时用整数变量（机器台数这类场景）
 """
 from __future__ import annotations
 
 EPS = 1e-9
 MAX_ITER = 5000
 
+try:
+    from ortools.linear_solver import pywraplp
+
+    HAS_ORTOOLS = True
+except ImportError:  # pragma: no cover
+    HAS_ORTOOLS = False
+
 
 class LP:
-    def __init__(self, num_vars: int, name: str = ""):
+    def __init__(self, num_vars: int, name: str = "lp", integer: bool = False):
         self.n = num_vars
         self.name = name
+        self.integer = integer
         self.rows: list[tuple[list[float], str, float]] = []
         self.c: list[float] = [0.0] * num_vars
 
-    def _coef(self, d: dict[int, float] | list[float]) -> list[float]:
+    def _coef(self, d) -> list[float]:
         v = [0.0] * self.n
         if isinstance(d, dict):
             for k, val in d.items():
@@ -45,28 +55,64 @@ class LP:
         return self
 
     def obj(self, d):
-        """直接给 minimize 的系数；要 maximize 就传负值。"""
+        """给 minimize 的系数；要 maximize 就传负值。"""
         self.c = self._coef(d)
         return self
 
-    # ---------- 求解 ----------
     def solve(self):
+        if HAS_ORTOOLS:
+            return self._solve_ortools()
+        return self._solve_simplex()
+
+    # ---------- OR-Tools ----------
+    def _solve_ortools(self):
+        solver = pywraplp.Solver.CreateSolver("SCIP" if self.integer else "GLOP")
+        if solver is None:
+            return self._solve_simplex()
+        inf = solver.infinity()
+        x = []
+        for i in range(self.n):
+            if self.integer:
+                x.append(solver.IntVar(0, inf, f"x{i}"))
+            else:
+                x.append(solver.NumVar(0, inf, f"x{i}"))
+
+        for coefs, op, rhs in self.rows:
+            expr = solver.Sum(coefs[i] * x[i] for i in range(self.n) if coefs[i])
+            if op == "<=":
+                solver.Add(expr <= rhs)
+            elif op == ">=":
+                solver.Add(expr >= rhs)
+            else:
+                solver.Add(expr == rhs)
+
+        solver.Minimize(solver.Sum(self.c[i] * x[i] for i in range(self.n) if self.c[i]))
+        st = solver.Solve()
+        if st == pywraplp.Solver.OPTIMAL:
+            vals = [v.solution_value() for v in x]
+            return "optimal", vals, sum(c * v for c, v in zip(self.c, vals))
+        if st == pywraplp.Solver.INFEASIBLE:
+            return "infeasible", None, None
+        if st == pywraplp.Solver.UNBOUNDED:
+            return "unbounded", None, None
+        return "error", None, None
+
+    # ---------- 内置单纯形（无 ortools 时） ----------
+    def _solve_simplex(self):
         n = self.n
         rows = []
         for coefs, op, rhs in self.rows:
             c = list(coefs)
             if rhs < 0:
-                c = [-x for x in c]
+                c = [-v for v in c]
                 rhs = -rhs
                 op = {"<=": ">=", ">=": "<=", "=": "="}[op]
             rows.append((c, op, rhs))
 
-        slack, art = [], []
         n_slack = sum(1 for _, op, _ in rows if op in ("<=", ">="))
         n_art = sum(1 for _, op, _ in rows if op in (">=", "="))
         total = n + n_slack + n_art
-        T = []
-        basis = []
+        T, basis = [], []
         s_idx, a_idx = n, n + n_slack
         for coefs, op, rhs in rows:
             row = coefs + [0.0] * (total - n)
@@ -87,8 +133,8 @@ class LP:
             T.append(row + [rhs])
 
         def pivot(tr, tc):
-            piv = T[tr][tc]
-            T[tr] = [v / piv for v in T[tr]]
+            p = T[tr][tc]
+            T[tr] = [v / p for v in T[tr]]
             for i in range(len(T)):
                 if i != tr and abs(T[i][tc]) > EPS:
                     f = T[i][tc]
@@ -96,9 +142,7 @@ class LP:
 
         def simplex(allowed, phase1=False):
             for _ in range(MAX_ITER):
-                # 目标行：cz - c
                 if phase1:
-                    # 最小化人工变量之和
                     cost = [0.0] * total
                     for j in range(n + n_slack, total):
                         cost[j] = 1.0
@@ -106,75 +150,60 @@ class LP:
                     cost = [0.0] * total
                     for j in range(n):
                         cost[j] = self.c[j]
-                # 计算 reduced cost（对基变量消元）
                 cz = list(cost)
                 for i, bj in enumerate(basis):
                     if abs(cz[bj]) > EPS:
                         f = cz[bj]
                         cz = [a - f * b for a, b in zip(cz, T[i][:-1])]
-                enter = -1
-                for j in allowed:
-                    if cz[j] < -EPS:
-                        enter = j
-                        break
+                enter = next((j for j in allowed if cz[j] < -EPS), -1)
                 if enter < 0:
                     return True
                 best, ratio = -1, float("inf")
                 for i in range(len(T)):
                     aij = T[i][enter]
-                    if aij > EPS:
-                        r = T[i][-1] / aij
-                        if r < ratio - EPS:
-                            ratio, best = r, i
+                    if aij > EPS and T[i][-1] / aij < ratio - EPS:
+                        ratio, best = T[i][-1] / aij, i
                 if best < 0:
                     return False
                 pivot(best, enter)
                 basis[best] = enter
             return False
 
-        art_cols = list(range(n + n_slack, total))
-        if art_cols:
+        art = list(range(n + n_slack, total))
+        if art:
             if not simplex(range(total), phase1=True):
                 return "infeasible", None, None
-            val = sum(T[i][-1] for i in range(len(T)) if basis[i] in art_cols)
-            if val > 1e-6:
+            if sum(T[i][-1] for i in range(len(T)) if basis[i] in art) > 1e-6:
                 return "infeasible", None, None
-            # 驱除人工变量
             for i in range(len(T)):
-                if basis[i] in art_cols:
+                if basis[i] in art:
                     for j in range(total):
-                        if j not in art_cols and abs(T[i][j]) > EPS:
+                        if j not in art and abs(T[i][j]) > EPS:
                             pivot(i, j)
                             basis[i] = j
                             break
-
-        allowed = [j for j in range(total) if j not in art_cols]
-        if not simplex(allowed):
+        if not simplex([j for j in range(total) if j not in art]):
             return "unbounded", None, None
-
         x = [0.0] * n
         for i, bj in enumerate(basis):
             if bj < n:
                 x[bj] = T[i][-1]
-        obj = sum(ci * xi for ci, xi in zip(self.c, x))
-        return "optimal", x, obj
+        return "optimal", x, sum(c * v for c, v in zip(self.c, x))
 
 
 def _selftest():
-    # max x1 + x2 ; x1 + 2x2 <= 4 ; x1 <= 3
-    lp = LP(2).le({0: 1, 1: 2}, 4).le({0: 1}, 3)
-    lp.obj({0: -1, 1: -1})
+    lp = LP(2).le({0: 1, 1: 2}, 4).le({0: 1}, 3).obj({0: -1, 1: -1})
     st, x, o = lp.solve()
-    assert st == "optimal", st
-    assert abs(-o - 3.5) < 1e-6, (x, o)
+    assert st == "optimal" and abs(-o - 3.5) < 1e-6, (st, x, o)
 
-    # 等式 + 非零下界：x1 + x2 = 5, x1 - x2 >= 1, min x1
-    lp = LP(2).eq({0: 1, 1: 1}, 5).ge({0: 1, 1: -1}, 1)
-    lp.obj({0: 1})
+    lp = LP(2).eq({0: 1, 1: 1}, 5).ge({0: 1, 1: -1}, 1).obj({0: 1})
     st, x, o = lp.solve()
-    assert st == "optimal", st
-    assert abs(o - 3.0) < 1e-6, (x, o)
-    print("lp selftest ok")
+    assert st == "optimal" and abs(o - 3.0) < 1e-6, (st, x, o)
+
+    lp = LP(1).ge({0: 1}, 10).le({0: 1}, 1).obj({0: 1})
+    assert lp.solve()[0] == "infeasible"
+
+    print("lp selftest ok | backend:", "ortools" if HAS_ORTOOLS else "simplex")
 
 
 if __name__ == "__main__":

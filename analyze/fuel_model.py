@@ -23,7 +23,8 @@ POWER_EFF = 0.5
 MINE_E = 0.25
 
 
-def build(allowed: set[str] | None, target_mj: float):
+def build(allowed: set[str] | None, target_mj: float, extra_power: float = 0.0,
+          min_dist1: float = 0.0):
     """allowed=None 表示所有燃料都能烧；否则只允许这些燃料用于发电。"""
     names = ["mine", "dist1", "dist2", "out_raw", "out_coal", "out_coke",
              "flare_gas", "flare_tar"]
@@ -77,25 +78,31 @@ def build(allowed: set[str] | None, target_mj: float):
             supply[jj] = supply.get(jj, 0) - POWER_EFF * FUEL[f]
     for j, v in demand.items():
         supply[j] = supply.get(j, 0) + v
-    # supply 的符号是「需求 - 发电量」，所以 <= 0 表示发电 >= 需求（允许超发浪费）
-    lp.le(supply, 0)
+
+    # supply 的符号是「需求 - 发电量」，<= 0 表示发电 >= 需求（允许超发浪费）
+    # 额外用电需求作为常数项放在右边
+    lp.le(supply, -extra_power)
 
     # 对外输出热值
     lp.eq({idx["out_raw"]: FUEL["raw-coal"],
            idx["out_coal"]: FUEL["coal"],
            idx["out_coke"]: FUEL["coke"]}, target_mj)
 
+    if min_dist1:
+        lp.ge({idx["dist1"]: 1.0}, min_dist1)   # 化工需求：蒸馏线已经在跑
+
     lp.obj({idx["mine"]: 1.0})
     return lp, names, burn
 
 
-def run(allowed: set[str] | None, target_mj: float, force_out: str | None = None):
+def run(allowed: set[str] | None, target_mj: float, force_out: str | None = None,
+        extra_power: float = 0.0, min_dist1: float = 0.0):
     """force_out 指定时必须只输出该燃料；None 表示求解器自由选择输出什么。
 
     注意：生产某燃料的伴生副产物（coal-gas / tar）始终允许烧掉，
     否则蒸馏路线会因为副产物堵死而假性不可行。
     """
-    lp, names, burn = build(allowed, target_mj)
+    lp, names, burn = build(allowed, target_mj, extra_power, min_dist1)
     idx = {n: i for i, n in enumerate(names)}
     if force_out:
         for f, var in (("raw-coal", "out_raw"), ("coal", "out_coal"), ("coke", "out_coke")):
@@ -144,5 +151,39 @@ def main() -> None:
         print(f"  {k:16s} {v:9.4f}")
 
 
+def power_scan():
+    """固定不输出燃料，只供外部用电：看不同需求下最优烧什么。"""
+    print("\n=== 纯供电场景：需求越大，混烧是否变化 ===")
+    print(f'{"需求 MJ/min":>12s} {"采煤":>9s} {"EROI":>7s}  组合')
+    for p in (30, 60, 120, 240, 480, 960):
+        r = run(None, 0.0, extra_power=p)
+        if r["status"] != "optimal":
+            print(f"{p:12.0f} {'-':>9s} {'-':>7s}  {r['status']}")
+            continue
+        coal = r["coal"]
+        mix = " + ".join(f"{k.replace('burn_','')}×{v:.1f}"
+                         for k, v in r["detail"].items() if k.startswith("burn_"))
+        print(f"{p:12.0f} {coal:9.2f} {p/(coal*COAL_MJ)*100:6.1f}%  {mix or '(无燃烧)'}")
+
+
+def mixed_case():
+    """化工线已经在跑，副产物必须消化 —— 这时混烧才有意义。"""
+    print("\n=== 有蒸馏线时：副产物 + 燃料的混烧比例 ===")
+    print(f'{"蒸馏批次":>8s} {"外部用电":>9s} {"采煤":>7s}  燃烧组合')
+    for d1 in (0, 2, 5, 10, 20):
+        for p in (60, 240):
+            r = run(None, 0.0, extra_power=p, min_dist1=d1)
+            if r["status"] != "optimal":
+                print(f"{d1:8.0f} {p:9.0f}  {r['status']}")
+                continue
+            mix = " + ".join(f"{k.replace('burn_','')}×{v:.1f}"
+                             for k, v in sorted(r["detail"].items()) if k.startswith("burn_"))
+            flare = sum(v for k, v in r["detail"].items() if k.startswith("flare_"))
+            print(f"{d1:8.0f} {p:9.0f} {r['coal']:7.1f}  {mix}"
+                  + (f"  (放空 {flare:.0f})" if flare else ""))
+
+
 if __name__ == "__main__":
     main()
+    power_scan()
+    mixed_case()
