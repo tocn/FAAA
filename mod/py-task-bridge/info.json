@@ -1,0 +1,12 @@
+{
+  "name": "py-task-bridge",
+  "version": "0.2.0",
+  "title": "Py Task Bridge",
+  "author": "local",
+  "factorio_version": "2.0",
+  "dependencies": [
+    "base >= 2.0.0",
+    "? Todo-List"
+  ],
+  "description": "导出产量/电力/科技快照，并在 Instrument Mode 下把外部生成的任务清单写入 Todo-List。"
+}

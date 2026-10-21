@@ -1,0 +1,23 @@
+# 生成物与本地数据，不进仓库
+data/
+out/
+_saves/
+_dump/
+demo-stats.json
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 游戏侧临时输出
+script-output/
